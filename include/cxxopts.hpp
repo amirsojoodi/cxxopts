@@ -27,6 +27,8 @@ THE SOFTWARE.
 #ifndef CXXOPTS_HPP_INCLUDED
 #define CXXOPTS_HPP_INCLUDED
 
+#include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -92,7 +94,7 @@ THE SOFTWARE.
 #endif
 
 #define CXXOPTS__VERSION_MAJOR 3
-#define CXXOPTS__VERSION_MINOR 1
+#define CXXOPTS__VERSION_MINOR 2
 #define CXXOPTS__VERSION_PATCH 1
 
 #if (__GNUC__ < 10 || (__GNUC__ == 10 && __GNUC_MINOR__ < 1)) && __GNUC__ >= 6
@@ -972,13 +974,26 @@ integer_parser(const std::string& text, T& value)
       throw_or_mimic<exceptions::incorrect_argument_type>(text);
     }
 
-    const US next = static_cast<US>(result * base + digit);
-    if (result > next)
+    US limit = 0;
+    if (negative)
+    {
+      limit = static_cast<US>(std::abs(static_cast<intmax_t>((std::numeric_limits<T>::min)())));
+    }
+    else
+    {
+      limit = (std::numeric_limits<T>::max)();
+    }
+
+    if (base != 0 && result > limit / base)
+    {
+      throw_or_mimic<exceptions::incorrect_argument_type>(text);
+    }
+    if (result * base > limit - digit)
     {
       throw_or_mimic<exceptions::incorrect_argument_type>(text);
     }
 
-    result = next;
+    result = static_cast<US>(result * base + digit);
   }
 
   detail::check_signed_range<T>(negative, result, text);
@@ -1048,6 +1063,28 @@ parse_value(const std::string& text, T& value) {
   stringstream_parser(text, value);
 }
 
+#ifdef CXXOPTS_HAS_OPTIONAL
+template <typename T>
+void
+parse_value(const std::string& text, std::optional<T>& value)
+{
+  T result;
+  parse_value(text, result);
+  value = std::move(result);
+}
+#endif
+
+inline
+void parse_value(const std::string& text, char& c)
+{
+  if (text.length() != 1)
+  {
+    throw_or_mimic<exceptions::incorrect_argument_type>(text);
+  }
+
+  c = text[0];
+}
+
 template <typename T>
 void
 parse_value(const std::string& text, std::vector<T>& value)
@@ -1081,28 +1118,6 @@ add_value(const std::string& text, std::vector<T>& value)
   T v;
   add_value(text, v);
   value.emplace_back(std::move(v));
-}
-
-#ifdef CXXOPTS_HAS_OPTIONAL
-template <typename T>
-void
-parse_value(const std::string& text, std::optional<T>& value)
-{
-  T result;
-  parse_value(text, result);
-  value = std::move(result);
-}
-#endif
-
-inline
-void parse_value(const std::string& text, char& c)
-{
-  if (text.length() != 1)
-  {
-    throw_or_mimic<exceptions::incorrect_argument_type>(text);
-  }
-
-  c = text[0];
 }
 
 template <typename T>
@@ -1524,6 +1539,18 @@ CXXOPTS_DIAGNOSTIC_POP
     return CXXOPTS_RTTI_CAST<const values::standard_value<T>&>(*m_value).get();
   }
 
+#ifdef CXXOPTS_HAS_OPTIONAL
+  template <typename T>
+  std::optional<T>
+  as_optional() const
+  {
+    if (m_value == nullptr) {
+      return std::nullopt;
+    }
+    return as<T>();
+  }
+#endif
+
   private:
   void
   ensure_value(const std::shared_ptr<const OptionDetails>& details)
@@ -1716,6 +1743,12 @@ CXXOPTS_DIAGNOSTIC_POP
     return viter->second.count();
   }
 
+  bool
+  contains(const std::string& o) const
+  {
+    return static_cast<bool>(count(o));
+  }
+
   const OptionValue&
   operator[](const std::string& option) const
   {
@@ -1735,6 +1768,24 @@ CXXOPTS_DIAGNOSTIC_POP
 
     return viter->second;
   }
+
+#ifdef CXXOPTS_HAS_OPTIONAL
+  template <typename T>
+  std::optional<T>
+  as_optional(const std::string& option) const
+  {
+    auto iter = m_keys.find(option);
+    if (iter != m_keys.end())
+    {
+      auto viter = m_values.find(iter->second);
+      if (viter != m_values.end())
+      {
+        return viter->second.as_optional<T>();
+      }
+    }
+    return std::nullopt;
+  }
+#endif
 
   const std::vector<KeyValue>&
   arguments() const
@@ -2033,6 +2084,7 @@ class Options
   std::unordered_set<std::string> m_positional_set{};
 
   //mapping from groups to help options
+  std::vector<std::string> m_group{};
   std::map<std::string, HelpGroupDetails> m_help{};
 };
 
@@ -2724,6 +2776,12 @@ Options::add_option
   }
 
   //add the help details
+
+  if (m_help.find(group) == m_help.end())
+  {
+    m_group.push_back(group);
+  }
+
   auto& options = m_help[group];
 
   options.options.emplace_back(HelpOptionDetails{s, l, stringDesc,
@@ -2855,19 +2913,7 @@ inline
 void
 Options::generate_all_groups_help(String& result) const
 {
-  std::vector<std::string> all_groups;
-
-  std::transform(
-    m_help.begin(),
-    m_help.end(),
-    std::back_inserter(all_groups),
-    [] (const std::map<std::string, HelpGroupDetails>::value_type& group)
-    {
-      return group.first;
-    }
-  );
-
-  generate_group_help(result, all_groups);
+  generate_group_help(result, m_group);
 }
 
 inline
@@ -2908,19 +2954,7 @@ inline
 std::vector<std::string>
 Options::groups() const
 {
-  std::vector<std::string> g;
-
-  std::transform(
-    m_help.begin(),
-    m_help.end(),
-    std::back_inserter(g),
-    [] (const std::map<std::string, HelpGroupDetails>::value_type& pair)
-    {
-      return pair.first;
-    }
-  );
-
-  return g;
+  return m_group;
 }
 
 inline

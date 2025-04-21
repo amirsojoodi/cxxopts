@@ -2345,6 +2345,7 @@ format_custom_help
         char last_char = result.back();
         result.pop_back();
         i--;
+        (void)last_char;
       }
 
       result.push_back('\n');
